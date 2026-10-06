@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Company Rater - AI Mode",
+  "version": "2.0.0",
+  "description": "Uses Google's AI answers to rate each company's overall performance (1-10, with a one-line reason) from its name, address and website - finding the official website first when your list doesn't have one. Pauses and waits for you to solve any CAPTCHA by hand, then continues automatically - it never solves one itself.",
+  "permissions": ["storage", "unlimitedStorage", "tabs", "scripting", "downloads", "alarms"],
+  "host_permissions": ["https://www.google.com/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; base-uri 'self';"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Company Rater - AI Mode"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.google.com/search*",
+        "https://google.com/search*",
+        "https://*.google.com/search*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}
