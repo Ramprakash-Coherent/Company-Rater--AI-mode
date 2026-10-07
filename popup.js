@@ -332,7 +332,7 @@ async function refresh() {
     document.getElementById("delayMin").value = project.delayMinSec;
     document.getElementById("delayMax").value = project.delayMaxSec;
     document.getElementById("concurrency").value = project.concurrency || 1;
-    document.getElementById("batchSize").value = project.batchSize || 5;
+    document.getElementById("batchSize").value = project.batchSize || 1;
   }
   const canEditSettings = !isSelectedTheActiveOne || (!engine.isRunning && !engine.isPaused);
   updateSettingsBtn.style.display = "inline-block";
@@ -348,7 +348,7 @@ async function refresh() {
 
   document.getElementById("status").textContent =
     `Total: ${total} (${project.concurrency || 1} concurrent tab${(project.concurrency || 1) > 1 ? "s" : ""}, ` +
-    `${project.batchSize || 5} ${(project.batchSize || 5) > 1 ? "companies" : "company"} per search)\n` +
+    `${project.batchSize || 1} ${(project.batchSize || 1) > 1 ? "companies" : "company"} per search)\n` +
     `Pending: ${counts.pending}\nRated: ${counts.found}\n` +
     `Blocked (needs manual review): ${counts.blocked}\nNot rated: ${counts.not_found}`;
 
@@ -440,7 +440,7 @@ document.getElementById("csvFile").addEventListener("change", async (e) => {
   const delayMinSec = Number(document.getElementById("delayMin").value) || 8;
   const delayMaxSec = Number(document.getElementById("delayMax").value) || 15;
   const concurrency = Number(document.getElementById("concurrency").value) || 1;
-  const batchSize = Number(document.getElementById("batchSize").value) || 5;
+  const batchSize = Number(document.getElementById("batchSize").value) || 1;
   const res = await chrome.runtime.sendMessage({
     type: "CREATE_PROJECT",
     name,
@@ -463,7 +463,7 @@ document.getElementById("updateSettingsBtn").addEventListener("click", async () 
   const delayMinSec = Number(document.getElementById("delayMin").value) || 8;
   const delayMaxSec = Number(document.getElementById("delayMax").value) || 15;
   const concurrency = Number(document.getElementById("concurrency").value) || 1;
-  const batchSize = Number(document.getElementById("batchSize").value) || 5;
+  const batchSize = Number(document.getElementById("batchSize").value) || 1;
   const res = await chrome.runtime.sendMessage({
     type: "UPDATE_PROJECT_SETTINGS",
     projectId: selectedProjectId,

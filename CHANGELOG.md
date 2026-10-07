@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.0.1 - Fix: every company came back "not rated"
+
+**Symptom:** runs produced no ratings at all; the error log showed
+`content script error ... message channel closed before a response was
+received` and `Receiving end does not exist`.
+
+**Root cause 1 (why there were no results):** the 2.0.0 prompt was long and
+instruction-heavy, and with 10 companies per search Google simply **did not
+answer it** - checked against the live page with the exact query from the
+log, there was no AI Overview and no AI Mode answer, only ordinary web
+results. There was nothing on the page to extract. The same request phrased
+as a short question about **one** company gets a full AI Overview answer.
+
+**Root cause 2 (the parser wouldn't have read the answer anyway):** Google
+doesn't lay the answer out as one tidy line. Measured on the live page:
+
+    WEBSITE: Solina Denmark (Group site) / Solina Retail DK (Danish retail site)
+    Solina Denmark
+     +1
+    RATING: 8.5 / 10
+    REASON: Solina Denmark A/S ... enjoys a highly robust reputation ...
+
+Each field on its own line, citation chips in between, and the website
+written as a *name* - the real address is only in the link behind it.
+
+**Fixes:**
+- **Short, conversational prompts** (`buildPrompt`/`buildBatchPrompt`),
+  using the wording verified to get an answer.
+- **Companies per search now defaults to 1** (new projects, and the popup
+  field). Existing projects keep their setting - set it to 1 and click
+  "Update settings for this project".
+- **New parser** (`extractAnswers` in `content.js`): finds each label on its
+  own and pairs a WEBSITE with the RATING/REASON that follow it, tolerating
+  lines in between. Labels are matched in UPPERCASE only, so review snippets
+  like `Rating: 4.6` elsewhere on the page are never read as a rating.
+- **Website from the link** (`websiteLinksByLabel`/`resolveWebsites`): when
+  the answer names the website instead of writing its address, the real
+  address is recovered from the page (Google keeps it next to the link).
+- **Stuck runs after a reload:** reloading the extension mid-run killed its
+  alarms while storage still said "running", so nothing ever resumed and
+  Start stayed disabled. On install/update/startup a stale run is now
+  stopped cleanly (claimed companies stay pending) - just press Start.
+- The content script retries its first call to the background a couple of
+  times, so a service worker that is just waking up doesn't cost a batch.
+
+**After updating:** reload the extension, set "Companies per search" to 1
+for your project, click **Retry not-rated rows**, then **Start**.
+
 ## 2.0.0 - Repurposed: rate companies instead of collecting contact details
 
 The extension no longer looks for email, phone, certifications or a contact

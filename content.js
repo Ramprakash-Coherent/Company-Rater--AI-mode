@@ -396,80 +396,165 @@
     return tidyText(raw) || null;
   }
 
-  // Labels may arrive wrapped in markdown emphasis despite the prompt asking
-  // for none, e.g. "**WEBSITE:** acme.de".
-  const lbl = (name) => `\\*{0,2}\\s*${name}\\s*\\*{0,2}\\s*:\\s*\\*{0,2}\\s*`;
-  // Batch lines keep all three fields on ONE line, separated by "|".
-  const BATCH_SEP = "\\s*\\|\\s*";
-  // A solo answer is three separate lines, but Google sometimes renders it
-  // on one line with pipes anyway - accept either.
-  const SOLO_SEP = "\\s*\\|?\\s*";
+  // How Google actually lays the answer out (measured on a live AI Overview,
+  // Oct 2026) is NOT the tidy one-line format the prompt asks for:
+  //
+  //   WEBSITE: Solina Denmark (Group site) / Solina Retail DK (Danish retail site)
+  //   Solina Denmark
+  //    +1
+  //   RATING: 8.5 / 10
+  //   REASON: Solina Denmark A/S enjoys a highly robust reputation ...
+  //
+  // Each field on its own line, citation chips ("Solina Denmark +1") wedged
+  // in between, and the website written as a NAME with the real address only
+  // in the link behind it (see websiteLinksByLabel). So instead of one rigid
+  // regex, each label is found on its own and its value read to the end of
+  // its line (or the next "|"), and a WEBSITE is paired with the RATING and
+  // REASON that follow it before the next WEBSITE.
+  //
+  // Labels are matched UPPERCASE ONLY (no "i" flag) - the answer uses the
+  // exact labels the prompt asked for, while review snippets elsewhere on a
+  // results page say "Rating: 4.6", which must never be read as a rating.
+  // Markdown emphasis ("**RATING:** 7") is tolerated.
+  const LABEL_RE = /\*{0,2}\b(WEBSITE|RATING|REASON)\s*\*{0,2}\s*:\s*\*{0,2}/g;
+  // A RATING/REASON further than this from its WEBSITE belongs to something
+  // else on the page, not to this answer.
+  const MAX_FIELD_GAP = 800;
 
-  // Finds every WEBSITE -> RATING (-> REASON) answer in the page text, in
-  // reading order. Anchoring RATING to a WEBSITE directly before it matters:
-  // an ordinary results page is full of review snippets like "Rating: 4.6",
-  // and a bare RATING label would pick those up.
+  function isPlaceholderOrEcho(raw) {
+    return isPlaceholderTemplateValue(raw) || /^\s*(\.\.\.|…)/.test(raw);
+  }
+
+  // Finds every WEBSITE -> RATING -> REASON answer in the page text, in
+  // reading order. The prompt's own echo ("WEBSITE: ... | RATING: ...", or
+  // the "<...>" placeholders) is skipped - see isPlaceholderOrEcho.
   //
-  // WEBSITE and RATING are REQUIRED; REASON is OPTIONAL. The regex is
-  // all-or-nothing by nature - a line that does not match contributes
-  // nothing - so a model that rated a company but left off the reason still
-  // yields its rating rather than losing the whole line.
-  //
-  // Filters out the prompt's own echoed template line (see
-  // isPlaceholderTemplateValue), so what's left is real answers only.
-  //
-  // `complete` says the REASON field was there. `pending` marks a line whose
-  // core matched but which is immediately followed by a "|" with no parsed
-  // reason behind it: that pipe says the reason is still streaming in, and
-  // runBatch uses it to avoid declaring the answer ready one instant early.
-  function extractAnswers(text, sep) {
-    const re = new RegExp(
-      `${lbl("WEBSITE")}([^|\\n]+?)${sep}${lbl("RATING")}([^|\\n]+?)` +
-        `(?:${sep}${lbl("REASON")}([^|\\n]+))?(?=\\s*(?:\\||\\n|$))`,
-      "gi"
-    );
-    return [...text.matchAll(re)]
-      .filter((m) => !isPlaceholderTemplateValue(m[1]) && !isPlaceholderTemplateValue(m[2]))
-      .map((m) => {
-        const reasonRaw = m[3] && !isPlaceholderTemplateValue(m[3]) ? m[3] : null;
-        return {
-          website: toWebsite(cleanValue(m[1])),
-          rating: toRating(cleanValue(m[2])),
-          reason: reasonRaw ? toReason(cleanValue(reasonRaw)) : null,
-          complete: !!m[3],
-          pending: !m[3] && /^\s*\|/.test(text.slice(m.index + m[0].length)),
-        };
+  // `rawWebsite` is kept so a website written as a name can be resolved to
+  // its real address from the page's links afterwards (resolveWebsites).
+  // `complete` says a REASON came with it. `pending` marks an answer whose
+  // RATING is followed by a "|" with no REASON yet: the reason is still
+  // streaming in, so the wait shouldn't end one instant early.
+  function extractAnswers(text) {
+    const labels = [...text.matchAll(LABEL_RE)].map((m) => ({
+      name: m[1],
+      start: m.index,
+      valueStart: m.index + m[0].length,
+    }));
+    const valueOf = (i) => {
+      const end = i + 1 < labels.length ? labels[i + 1].start : text.length;
+      // A label sitting alone at the end of its line takes the next line.
+      const raw = text.slice(labels[i].valueStart, end).replace(/^[ \t]*\n?[ \t]*/, "");
+      const cut = raw.search(/[|\n]/);
+      return {
+        raw: (cut === -1 ? raw : raw.slice(0, cut)).trim(),
+        endsInPipe: cut !== -1 && raw[cut] === "|",
+      };
+    };
+
+    const answers = [];
+    for (let i = 0; i < labels.length; i++) {
+      if (labels[i].name !== "WEBSITE") continue;
+      const site = valueOf(i);
+      if (isPlaceholderOrEcho(site.raw)) continue;
+      let rating = null;
+      let reason = null;
+      for (let j = i + 1; j < labels.length && labels[j].name !== "WEBSITE"; j++) {
+        if (labels[j].start - labels[i].start > MAX_FIELD_GAP) break;
+        if (labels[j].name === "RATING" && !rating) rating = valueOf(j);
+        else if (labels[j].name === "REASON" && rating && !reason) reason = valueOf(j);
+      }
+      if (!rating || isPlaceholderOrEcho(rating.raw)) continue;
+      const reasonRaw = reason && !isPlaceholderOrEcho(reason.raw) ? reason.raw : null;
+      answers.push({
+        rawWebsite: cleanValue(site.raw),
+        website: toWebsite(cleanValue(site.raw)),
+        rating: toRating(cleanValue(rating.raw)),
+        reason: reasonRaw ? toReason(cleanValue(reasonRaw)) : null,
+        complete: !!(reason && reason.raw),
+        pending: !reason && rating.endsInPipe,
       });
+    }
+    return answers;
+  }
+
+  // Google renders the website in an answer as a LINK, usually showing the
+  // company's name rather than its address ("WEBSITE: Solina Denmark"), and
+  // the link itself points at a google.com/goto redirect. The real address
+  // is still in the page: Google keeps it in an HTML comment right next to
+  // the link (<!--...[["https://www.solina.com/",...]]-->). This walks the
+  // DOM from each "WEBSITE:" label to the next "RATING:"/"REASON:" label and
+  // collects the first usable address it finds there - from such a comment,
+  // or from an ordinary link that isn't a Google redirect.
+  //
+  // This leans on undocumented markup; if Google changes it, the website
+  // simply comes back empty and the rating is unaffected.
+  function websiteLinksByLabel() {
+    const out = [];
+    if (!document.body) return out;
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT | NodeFilter.SHOW_COMMENT
+    );
+    let cur = null;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n.nodeType === Node.TEXT_NODE) {
+        const t = n.textContent || "";
+        if (/\bWEBSITE\s*:/.test(t)) {
+          cur = { text: t.split(/WEBSITE\s*:/).pop(), urls: [] };
+          out.push(cur);
+        } else if (/\b(RATING|REASON)\s*:/.test(t)) {
+          cur = null;
+        } else if (cur && cur.text.length < 300) {
+          cur.text += t;
+        }
+      } else if (cur && n.nodeType === Node.COMMENT_NODE) {
+        for (const m of (n.textContent || "").matchAll(/https?:\/\/[^\s"'\\\]]+/g)) cur.urls.push(m[0]);
+      } else if (cur && n.tagName === "A" && n.href) {
+        cur.urls.push(n.href);
+      }
+    }
+    return out.map((e) => ({
+      text: e.text.replace(/\*/g, "").replace(/\s+/g, " ").trim(),
+      url: e.urls.find((u) => isUsableUrl(u)) || null,
+    }));
+  }
+
+  // Fills in `website` for answers whose WEBSITE was written as a name, by
+  // finding that same label in the DOM (matched on the start of its text)
+  // and taking the address behind it. Answers that already have a website,
+  // or that said NONE, are left alone.
+  function resolveWebsites(answers) {
+    if (!answers.some((a) => !a.website && !isMissingText(a.rawWebsite))) return answers;
+    const dom = websiteLinksByLabel().filter((d) => d.url);
+    const used = new Set();
+    return answers.map((a) => {
+      if (a.website || isMissingText(a.rawWebsite)) return a;
+      const key = a.rawWebsite.replace(/\s+/g, " ").trim().slice(0, 20).toLowerCase();
+      const idx = dom.findIndex((d, k) => !used.has(k) && key && d.text.toLowerCase().startsWith(key));
+      if (idx === -1) return a;
+      used.add(idx);
+      return { ...a, website: dom[idx].url };
+    });
   }
 
   // The real answer is always the LAST one in reading order - anything
   // earlier is an echo of the question.
   function extractSoloAnswer(text) {
-    const all = extractAnswers(text, SOLO_SEP);
+    const all = extractAnswers(text);
     return all.length ? all[all.length - 1] : null;
   }
 
-  // Batch answer: one "WEBSITE: ... | RATING: ... | REASON: ..." line per
-  // company - see buildBatchPrompt in background.js. Deliberately NOT
-  // anchored on a leading company number, even though the prompt asks for
-  // one: Google's AI Mode very often renders a numbered reply as a real
-  // HTML ordered list, and a list's auto-generated item numbers ("1.",
-  // "2.", ...) are rendering-only - they are NOT part of
-  // document.body.innerText at all (this is standard browser behaviour,
-  // not a Google quirk). An earlier version of this function required
-  // that literal leading digit and so matched NOTHING against a
-  // perfectly good numbered answer once Google rendered it as a list -
-  // see CHANGELOG.md. Matching every triple in the page regardless of
-  // what precedes it, and assigning them to companies purely by the ORDER
-  // they appear in, sidesteps that entirely - it works whether Google
-  // renders "1.", "-", nothing, or a real <ol> marker in front of each one.
-  //
-  // The prompt's own echoed example line, which Google may or may not show
-  // above the answer, is already filtered out by extractAnswers - see
-  // isPlaceholderTemplateValue. runBatch relies on that to line matches back
-  // up with companies by position.
+  // Batch answer: one WEBSITE/RATING/REASON group per company - see
+  // buildBatchPrompt in background.js. Deliberately NOT anchored on a
+  // leading company number, even though the prompt asks for one: Google
+  // very often renders a numbered reply as a real HTML ordered list, and a
+  // list's auto-generated item numbers ("1.", "2.", ...) are rendering-only
+  // - they are NOT part of document.body.innerText at all (see
+  // CHANGELOG.md). Answers are assigned to companies by the ORDER they
+  // appear in instead (or by name when the count is off - see
+  // pairTriplesByName).
   function extractBatchAnswers(text) {
-    return extractAnswers(text, BATCH_SEP);
+    return extractAnswers(text);
   }
 
   // --- Pairing answer lines to companies by name, not just by position ---
@@ -696,10 +781,31 @@
   // GET_CURRENT is fetched out here (not inside runInner) so the catch-all
   // below still knows which batch/items to tag its fallback report with,
   // even if runInner blows up early.
+  // MV3 service workers are stopped when idle and restarted on demand, and a
+  // message that lands while one is stopping can fail with "message channel
+  // closed" or "Receiving end does not exist" even though the next attempt
+  // would wake it fine. A couple of retries keeps one such hiccup from writing
+  // a whole batch off.
+  async function getCurrentWithRetry() {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await chrome.runtime.sendMessage({ type: "GET_CURRENT" });
+      } catch (err) {
+        lastErr = err;
+        // Reloaded/removed extension: this copy of the script is orphaned and
+        // can never reach it again - retrying is pointless.
+        if (!chrome.runtime || !chrome.runtime.id) break;
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
   async function run() {
     let current = null;
     try {
-      current = await chrome.runtime.sendMessage({ type: "GET_CURRENT" });
+      current = await getCurrentWithRetry();
       if (!current || !Array.isArray(current.items) || !current.items.length) return; // not part of an active run - don't touch the page
       await runInner(current);
     } catch (err) {
@@ -802,7 +908,8 @@
         outcome = await waitForAnswer(readyForSingle, anyForSingle, ANSWER_WAIT_MS);
       }
 
-      const ai = extractSoloAnswer(deepenIfEmpty(pageText(), (t) => extractAnswers(t, SOLO_SEP).length)) || {};
+      const aiRaw = extractSoloAnswer(deepenIfEmpty(pageText(), (t) => extractAnswers(t).length));
+      const ai = (aiRaw && resolveWebsites([aiRaw])[0]) || {};
       // A website supplied in the input always wins - background.js never
       // overwrites it - so only look for one when there wasn't one.
       const panelWebsite = item.website ? null : getKnowledgePanelWebsite();
@@ -884,7 +991,7 @@
     // two, or added an extra), positional matching can no longer be
     // trusted, since a single skip/merge would silently shift every
     // company after it out of alignment - see the pairing below.
-    const allTriples = extractBatchAnswers(answerText);
+    const allTriples = resolveWebsites(extractBatchAnswers(answerText));
 
     // Nothing at all came back for this search. Rather than accept that (and
     // rather than dripping every company through a slow solo search, which

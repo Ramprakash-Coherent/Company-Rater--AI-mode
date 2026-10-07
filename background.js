@@ -109,7 +109,9 @@ const COMPLETION_LOG_SIZE = 30;
 const MAX_CONCURRENCY = 20;
 const MIN_BATCH_SIZE = 1;
 const MAX_BATCH_SIZE = 10; // higher risks the query getting too long / the AI dropping companies from a longer list
-const DEFAULT_BATCH_SIZE = 5;
+// 1 = one company per search - see the note above buildPrompt on why a
+// multi-company question often gets no AI answer at all.
+const DEFAULT_BATCH_SIZE = 1;
 
 // "found" means RATED: a 1-10 rating came back for the company. A website on
 // its own (found or supplied) without a rating is still "not_found".
@@ -338,86 +340,55 @@ function locationOf(item) {
   return item.address || [item.city, item.country].filter(Boolean).join(", ");
 }
 
-const OFFICIAL_SITE_RULE =
-  `its OFFICIAL website (not a directory, marketplace, or social media profile - ` +
-  `not LinkedIn, Facebook, Yellow Pages, Crunchbase, IndiaMART, Justdial, ` +
-  `Glassdoor, Indeed, ZoomInfo, D&B, Yelp, or similar)`;
-
 // What "overall performance" means, spelled out so every company is judged
 // on the same basis rather than whatever the model happens to weigh that day.
-const RATING_RULE =
-  `rate the company's OVERALL PERFORMANCE from 1 (very poor) to 10 (excellent), ` +
-  `judged on publicly available evidence: reputation and customer reviews, ` +
-  `market presence, growth, financial stability, and track record / years in ` +
-  `business`;
+const RATING_CRITERIA = "reputation, reviews, market presence, growth, financial stability";
 
-// The one-company prompt, used whenever a "batch" is really just one item -
-// either because project.batchSize is 1, or because this item was flagged
-// forceSingle after a batch answer didn't clearly cover it. Demanding a
-// strict machine-parseable reply and telling it to answer NONE instead of
-// guessing both matter here: without the strict format, content.js can't
-// reliably extract anything; without "say NONE", a generative answer will
-// happily invent a confident-sounding rating for a company it knows nothing
-// about rather than admit it.
+// WHY THE PROMPTS ARE SHORT AND CONVERSATIONAL. Measured on the live page
+// (Oct 2026): a long, instruction-heavy prompt ("Reply with ONLY these three
+// lines... no markdown... never write...") gets NO AI answer at all from
+// Google - neither the AI Overview on a normal results page nor AI Mode -
+// just ordinary web results, so nothing can be extracted and every company
+// is recorded not rated. The same request phrased as a short question with a
+// one-line format hint gets a full AI Overview answer with the labels intact.
+// Google decides whether to answer from the query text itself, so keep these
+// sounding like a question a person would type.
 //
-// A website the CSV already supplied is named in the question so the AI
-// rates the right company - two firms with the same name in the same city
-// are common. It is deliberately written WITHOUT a "Website:" label, which
-// content.js would otherwise mistake for part of the answer.
-function buildPrompt(item) {
+// The format hint uses "..." rather than "<placeholder>" text - content.js
+// recognises a value of "..." as the prompt's own echo, not an answer.
+//
+// A website the CSV already supplied is named in the question so the AI rates
+// the right company (two firms with the same name in the same town are
+// common). It is written WITHOUT a "website:" label, which content.js would
+// otherwise read as part of the answer.
+function describeCompany(item) {
   const location = locationOf(item);
-  const who = location ? `"${item.company_name}" located at ${location}` : `"${item.company_name}"`;
-  const siteStep = item.website
-    ? `Its official website is ${item.website} - use it to make sure you are looking at the right company.`
-    : `First find ${OFFICIAL_SITE_RULE}.`;
+  const site = item.website ? ` (official site ${item.website})` : "";
+  return `"${item.company_name}"${location ? `, ${location}` : ""}${site}`;
+}
+
+// The one-company prompt, used whenever a "batch" is really just one item.
+// This is the exact wording verified to get an answer.
+function buildPrompt(item) {
   return (
-    `Identify the company ${who}. ${siteStep} Then ${RATING_RULE}.\n\n` +
-    `Reply with ONLY these three lines, in exactly this format, and nothing else - ` +
-    `no greeting, no explanation, no markdown:\n` +
-    `WEBSITE: <official website URL, or NONE if you can't find one>\n` +
-    `RATING: <a whole number from 1 to 10, or NONE>\n` +
-    `REASON: <one short sentence explaining the rating, or NONE>\n\n` +
-    `Never write the "|" character inside a value. If there is not enough reliable ` +
-    `public information to judge this company, write NONE for RATING instead of guessing.`
+    `${describeCompany(item)}: what is its official website, and how would you rate ` +
+    `its overall performance from 1 to 10 (${RATING_CRITERIA})? ` +
+    `Answer in this format: WEBSITE: ... | RATING: ... | REASON: ...`
   );
 }
 
-// The batch prompt: the same question asked about several companies at
-// once, with a strict numbered reply format. Numbering is requested for
-// the model's own benefit (helps it keep each answer matched to the right
-// company) but content.js does NOT rely on parsing that number back out -
-// Google's AI Mode often renders a numbered reply as a real HTML list,
-// and list-marker numbers are never part of the page's actual text (see
-// extractAllTriples in content.js) - it instead matches every answer
-// triple in the page and lines them up with companies purely by the order
-// they appear in. The instructional part stays fixed-size regardless of
-// batch length (one example line, not one per company) so the whole query
-// scales linearly with just the company list itself, not the instructions
-// around it.
+// The batch prompt: the same short question asked about several companies at
+// once. Numbering is requested for the model's own benefit (helps it keep
+// each answer matched to the right company) but content.js does NOT rely on
+// parsing that number back out - see extractBatchAnswers in content.js.
+// NOTE: unlike buildPrompt, whether Google answers this reliably has not been
+// verified - which is why the default batch size is 1.
 function buildBatchPrompt(items) {
-  const listLines = items
-    .map((it, i) => {
-      const location = locationOf(it);
-      // No "Website:" label here either - see buildPrompt.
-      const site = it.website ? ` - official website ${it.website}` : "";
-      return `${i + 1}. "${it.company_name}"${location ? ` - ${location}` : ""}${site}`;
-    })
-    .join("\n");
+  const list = items.map((it, i) => `${i + 1}) ${describeCompany(it)}`).join(" ");
   return (
-    `I will list ${items.length} companies. For EACH one, in the exact order given: ` +
-    `where an official website is given, use it to make sure you are looking at ` +
-    `the right company; otherwise find ${OFFICIAL_SITE_RULE}. Then ${RATING_RULE}.\n\n` +
-    `Companies:\n${listLines}\n\n` +
-    `Reply with exactly ${items.length} lines, one per company, in the SAME order ` +
-    `and numbering as above, and nothing else - no greeting, no explanation, no ` +
-    `markdown. Use exactly this format for every line, repeating all three fields ` +
-    `for every numbered company - do not skip any field, do not omit any company, ` +
-    `and do not merge two companies onto one line:\n` +
-    `<number>. WEBSITE: <official website URL, or NONE> | ` +
-    `RATING: <a whole number from 1 to 10, or NONE> | ` +
-    `REASON: <one short sentence explaining the rating, or NONE>\n\n` +
-    `Never write the "|" character inside a value. If there is not enough reliable ` +
-    `public information to judge a company, write NONE for its RATING instead of guessing.`
+    `For each of these companies, give its official website and rate its overall ` +
+    `performance from 1 to 10 (${RATING_CRITERIA}): ${list}. ` +
+    `One line each, in the same order: WEBSITE: ... | RATING: ... | REASON: ...`
   );
 }
 
@@ -1083,6 +1054,43 @@ async function handleResult(rawMessage, tabId) {
     scheduleNext(workerIndex, randomDelayMs(project));
   }
 }
+
+// Reloading/updating the extension (or restarting Chrome) mid-run kills every
+// pending alarm and orphans the content scripts in the worker tabs, but the
+// stored engine state still says "running" with companies claimed. Nothing
+// would ever wake the workers again, and the popup's Start button stays
+// disabled because the project already looks like it's running - the run is
+// silently stuck. So on install/update/startup, any run that was in flight is
+// stopped cleanly: claims released (those companies are still "pending" and
+// get searched on the next Start), and on a reload the old worker tabs are
+// closed. Click Start to carry on.
+async function resetStaleRun(closeTabs) {
+  const before = await getEngine();
+  if (!before.isRunning && !before.isPaused) return;
+  clearAllWorkerAlarms(Math.max(before.workers.length, MAX_CONCURRENCY));
+  // Tab ids don't survive a browser restart (they could now belong to
+  // unrelated tabs), so they're only closed after an extension reload.
+  if (closeTabs) await closeWorkerSurfaces(before.workers);
+  await mutateEngine((engine) => ({
+    isRunning: false,
+    isPaused: false,
+    pauseReason: null,
+    captchaTabIds: [],
+    workers: engine.workers.map((w) => ({
+      ...w,
+      tabId: null,
+      windowId: null,
+      ownsWindow: false,
+      currentItemIds: [],
+      batchToken: null,
+    })),
+  }));
+  chrome.action.setBadgeText({ text: "" });
+  debug("Stale run from before the extension restarted was stopped - press Start to continue.");
+}
+
+chrome.runtime.onInstalled.addListener(() => resetStaleRun(true));
+chrome.runtime.onStartup.addListener(() => resetStaleRun(false));
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name.startsWith(WATCHDOG_PREFIX)) {

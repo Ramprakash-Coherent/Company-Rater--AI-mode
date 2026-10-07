@@ -73,13 +73,15 @@
     </div>
     <div>
       <label>Companies per search</label>
-      <input type="number" id="batchSize" value="5" min="1" max="10" />
+      <input type="number" id="batchSize" value="1" min="1" max="10" />
     </div>
   </div>
   <div class="hint">
-    Every search asks Google about "Companies per search" companies at once,
-    in one structured question - fewer searches for the same list, which is
-    both faster and lower-risk (fewer requests from your IP). If a search
+    <b>Keep "Companies per search" at 1.</b> Google reliably answers a short
+    question about one company, but a question listing several companies
+    often gets no AI answer at all - just ordinary web results - and every
+    company in it comes back not rated. Higher values are fewer searches
+    (faster, fewer requests from your IP) only if Google answers them. If a search
     comes back with no answer at all it is reloaded once, and anything still
     unresolved is recorded as not rated so the run moves straight on to the
     next batch. Companies are never re-searched one at a time (that was far
